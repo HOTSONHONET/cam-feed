@@ -2,15 +2,20 @@ package hub
 
 import (
 	"context"
+	"embed"
 	"encoding/binary"
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+//go:embed static/camera.html
+var staticFS embed.FS
 
 type StreamMeta struct {
 	DeviceID string `json:"device_id"`
@@ -138,6 +143,68 @@ func (h *Hub) HandleIngest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Hub) HandleView(w http.ResponseWriter, r *http.Request) {
+	room := r.URL.Query().Get("room")
+	if strings.TrimSpace(room) == "" {
+		room = "home"
+	}
+
+	c, err := h.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+
+	defer c.Close()
+
+	// registering viewer for the room
+	h.mu.Lock()
+	if h.viewers[room] == nil {
+		h.viewers[room] = map[*websocket.Conn]bool{}
+	}
+
+	h.viewers[room][c] = true
+
+	// Sending manifest
+	var list []StreamMeta
+
+	for _, m := range h.metas {
+		if m.Room == room {
+			list = append(list, m)
+		}
+	}
+	manifest, _ := json.Marshal(map[string]any{"type": "manifest", "streams": list})
+	_ = c.WriteMessage(websocket.TextMessage, manifest)
+
+	h.mu.Unlock()
+
+	// Creating a heartbeat service
+	c.SetReadLimit(1 << 10)
+	c.SetReadDeadline(time.Now().Add(60 * time.Second))
+
+	c.SetPongHandler(func(string) error {
+		// On receiving a pong from the client, reset the ReadDeadline for the connection
+		c.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
+
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+
+		for range t.C {
+			_ = c.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
+		}
+	}()
+
+	for {
+		if _, _, err := c.ReadMessage(); err != nil {
+			break
+		}
+	}
+
+	// Unregister the viewer
+	h.mu.Lock()
+	delete(h.viewers[room], c)
+	h.mu.Unlock()
 
 }
 
@@ -161,26 +228,34 @@ func (h *Hub) HandleManifest(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
-func (h *Hub) StartServer(ctx context.Context, addr string) error {
+func (h *Hub) StartServers(ctx context.Context) error {
 	mux := http.NewServeMux()
-
-	// Adding endpoints
 	mux.HandleFunc("/healthcheck", h.HealthCheck)
 	mux.HandleFunc("/", h.HealthCheck)
-	mux.HandleFunc("/ingest", h.HandleIngest)
-	mux.HandleFunc("/view", h.HandleView)
+	mux.HandleFunc("/ingest", h.HandleIngest) // used by phones (WSS on :6699)
+	mux.HandleFunc("/view", h.HandleView)     // used by Wails viewer (WS on :6698)
 	mux.HandleFunc("/manifest", h.HandleManifest)
+	mux.HandleFunc("/camera", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFileFS(w, r, staticFS, "static/camera.html")
+	})
 
-	server := &http.Server{
-		Addr:    addr,
-		Handler: mux,
-	}
+	https := &http.Server{Addr: "0.0.0.0:6699", Handler: mux}
+	httpS := &http.Server{Addr: "0.0.0.0:6698", Handler: mux}
 
 	go func() {
 		<-ctx.Done()
-		_ = server.Shutdown(context.Background())
+		_ = https.Shutdown(context.Background())
+		_ = httpS.Shutdown(context.Background())
 	}()
 
-	log.Println("Hub listening on", addr)
-	return server.ListenAndServe()
+	// run HTTPS in background
+	go func() {
+		log.Println("Hub HTTPS on :6699")
+		if err := https.ListenAndServeTLS("cert.pem", "key.pem"); err != http.ErrServerClosed {
+			log.Println("HTTPS server error:", err)
+		}
+	}()
+
+	log.Println("Hub HTTP on :6698")
+	return httpS.ListenAndServe()
 }

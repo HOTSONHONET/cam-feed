@@ -1,3 +1,10 @@
 build/bin
 node_modules
 frontend/dist
+key.pem
+cert.pem
+rootCA.crt
+rootCA.key
+rootCA.srl
+san.cnf
+server.csr
