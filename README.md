@@ -2,25 +2,46 @@
 
 ## About
 
-This is the official Wails React-TS template.
-
-You can configure the project by editing `wails.json`. More information about the project settings can be found
-here: https://wails.io/docs/reference/project-config
-
-## Live Development
-
-To run in live development mode, run `wails dev` in the project directory. This will run a Vite development
-server that will provide very fast hot reload of your frontend changes. If you want to develop in a browser
-and have access to your Go methods, there is also a dev server that runs on http://localhost:34115. Connect
-to this in your browser, and you can call your Go code from devtools.
-
-## Building
-
-To build a redistributable, production mode package, use `wails build`.
-
 
 ## How to run
 
+- The cameras are only accessible via Browsers, inorder to run access camera browsers requires `https` based endpoints. You can generate a self-signed Openssl certificate and use just paste in the project directory.
+
+```
+
+openssl commands...
+
+```
+
+- After the running the above commands the project to should look something like this
+
+```
+
+> tree -L 1 .
+.
+├── README.md
+├── app.go
+├── build
+├── cert.pem
+├── frontend
+├── go.mod
+├── go.sum
+├── internal
+├── key.pem
+├── main.go
+├── rootCA.crt
+├── rootCA.key
+├── rootCA.srl
+├── san.cnf
+├── server.csr
+└── wails.json
+
+4 directories, 13 files
+
+
+```
+
+- If you are on Linux, you can use this command
 ```
 
 wails dev -tags webkit2_41

@@ -240,22 +240,11 @@ func (h *Hub) StartServers(ctx context.Context) error {
 	})
 
 	https := &http.Server{Addr: "0.0.0.0:6699", Handler: mux}
-	httpS := &http.Server{Addr: "0.0.0.0:6698", Handler: mux}
 
 	go func() {
 		<-ctx.Done()
 		_ = https.Shutdown(context.Background())
-		_ = httpS.Shutdown(context.Background())
 	}()
 
-	// run HTTPS in background
-	go func() {
-		log.Println("Hub HTTPS on :6699")
-		if err := https.ListenAndServeTLS("cert.pem", "key.pem"); err != http.ErrServerClosed {
-			log.Println("HTTPS server error:", err)
-		}
-	}()
-
-	log.Println("Hub HTTP on :6698")
-	return httpS.ListenAndServe()
+	return https.ListenAndServeTLS("cert.pem", "key.pem")
 }
