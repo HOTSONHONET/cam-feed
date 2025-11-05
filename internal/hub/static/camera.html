@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>CamNet Camera</title>
+<style>
+  body { margin:0; font-family: system-ui, sans-serif; background:#0f172a; color:#e5e7eb; }
+  .wrap { padding:16px; max-width: 720px; margin: 0 auto; }
+  h1 { font-size:20px; margin: 8px 0 16px; text-align:center; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px; }
+  label { font-size:12px; opacity:.8; }
+  select, input[type=text], button { padding:8px 10px; border-radius:10px; border:1px solid #334155; background:#111827; color:#e5e7eb; }
+  button.primary { background:#22c55e; border-color:#16a34a; color:#06110a; font-weight:600; }
+  button.warn { background:#ef4444; border-color:#dc2626; color:#fff; }
+  .hud { font-size:12px; opacity:.85; margin:6px 0 10px; }
+  video, canvas { width:100%; max-height:60vh; background:#0b1220; border-radius:14px; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; margin-right:6px; }
+  .live { background:#16a34a22; border:1px solid #16a34a; color:#86efac; }
+  .recon { background:#f59e0b22; border:1px solid #f59e0b; color:#fde68a; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>CamNet Camera</h1>
+
+  <div class="row">
+    <label>Room</label>
+    <input id="room" type="text" value="home" />
+    <label>Device ID</label>
+    <input id="device" type="text" value="phone-1" />
+  </div>
+
+  <div class="row">
+    <label>Camera</label>
+    <select id="facing">
+      <option value="environment">Rear</option>
+      <option value="user">Front</option>
+    </select>
+    <label>Resolution</label>
+    <select id="res">
+      <option value="1280x720">1280×720</option>
+      <option value="1920x1080">1920×1080</option>
+      <option value="640x480">640×480</option>
+    </select>
+    <label>FPS</label>
+    <select id="fps">
+      <option>15</option>
+      <option selected>30</option>
+    </select>
+    <label>JPEG</label>
+    <select id="jpeg">
+      <option value="0.6">0.6</option>
+      <option value="0.7" selected>0.7</option>
+      <option value="0.8">0.8</option>
+    </select>
+  </div>
+
+  <div class="row">
+    <button id="start" class="primary">Start streaming</button>
+    <button id="stop" class="warn" disabled>Stop</button>
+    <button id="flip">Flip</button>
+    <label><input type="checkbox" id="keepawake" checked> Keep screen awake</label>
+  </div>
+
+  <div class="hud"><span id="status" class="pill">Idle</span><span id="stats"></span></div>
+
+  <video id="v" playsinline muted></video>
+  <canvas id="c" style="display:none"></canvas>
+</div>
+
+<script>
+(async () => {
+  const qs = new URLSearchParams(location.search);
+  const $ = (id) => document.getElementById(id);
+  const v = $("v"), c = $("c"), ctx = c.getContext("2d");
+  const facingSel = $("facing"), resSel = $("res"), fpsSel = $("fps"), jpegSel = $("jpeg");
+  const roomInp = $("room"), devInp = $("device");
+  const btnStart = $("start"), btnStop = $("stop"), btnFlip = $("flip");
+  const keepAwake = $("keepawake");
+  const pill = $("status"), stats = $("stats");
+  let pcWakeLock = null;
+
+  // prefill from query (?room=&device=&facing=&res=&fps=&jpeg=)
+  if (qs.get("room")) roomInp.value = qs.get("room");
+  if (qs.get("device")) devInp.value = qs.get("device");
+
+  const host = location.host;
+  const wsScheme = location.protocol === "https:" ? "wss" : "ws";
+  const wsURL = (room) => `${wsScheme}://${host}/ingest?room=${encodeURIComponent(room)}&token=demo-token`;
+  
+  let stream = null, ws = null, running = false, sending = false;
+  let sent = 0, dropped = 0, lastTs = performance.now();
+
+  function setPill(kind, text){
+    pill.className = "pill " + (kind || "");
+    pill.textContent = text;
+  }
+
+  async function getConstraints() {
+    const [w,h] = resSel.value.split("x").map(Number);
+    const fps = Number(fpsSel.value);
+    const facingMode = facingSel.value; // "environment" | "user"
+    return {
+      video: {
+        width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: fps },
+        facingMode
+      },
+      audio: false
+    };
+  }
+
+  async function start() {
+    try {
+      const cons = await getConstraints();
+      stream = await navigator.mediaDevices.getUserMedia(cons);
+      v.srcObject = stream;
+      await v.play();
+
+      // Canvas sizing to the real track settings
+      const track = stream.getVideoTracks()[0];
+      const s = track.getSettings();
+      c.width = s.width || v.videoWidth || 1280;
+      c.height = s.height || v.videoHeight || 720;
+
+      // Connect WS
+      ws = new WebSocket(wsURL(roomInp.value));
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = () => {
+        setPill("live", "LIVE");
+        sent = dropped = 0; lastTs = performance.now();
+        // Send meta once
+        const meta = {
+          device_id: devInp.value || `phone-${Math.random().toString(36).slice(2,7)}`,
+          room: roomInp.value || "home",
+          width: c.width, height: c.height, fps: Number(fpsSel.value)
+        };
+        ws.send(JSON.stringify(meta));
+        running = true;
+        pump(); // start frame loop
+      };
+
+      ws.onclose = ws.onerror = () => {
+        if (running) setPill("recon", "Reconnecting…");
+        running = false;
+      };
+
+      // Wake lock
+      if (keepAwake.checked && "wakeLock" in navigator) {
+        try { pcWakeLock = await navigator.wakeLock.request("screen"); } catch {}
+      }
+
+      btnStart.disabled = true; btnStop.disabled = false;
+
+    } catch (e) {
+      alert("Failed to start camera:\n" + e);
+      stop();
+    }
+  }
+
+  function stop() {
+    running = false;
+    sending = false;
+    if (ws && ws.readyState === WebSocket.OPEN) try { ws.close(); } catch {}
+    ws = null;
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+    }
+    if (pcWakeLock) { pcWakeLock.release().catch(()=>{}); pcWakeLock=null; }
+    setPill("", "Idle");
+    stats.textContent = "";
+    btnStart.disabled = false; btnStop.disabled = true;
+  }
+
+  async function flip() {
+    // Toggle facing and restart
+    facingSel.value = (facingSel.value === "environment") ? "user" : "environment";
+    if (running) { stop(); await new Promise(r => setTimeout(r,150)); start(); }
+  }
+
+  // JPEG frame pump at requested fps
+  async function pump() {
+    if (!running || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const fps = Number(fpsSel.value);
+    const period = 1000 / Math.max(1, fps);
+
+    const loop = async () => {
+      if (!running || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+      // draw current frame to canvas
+      ctx.drawImage(v, 0, 0, c.width, c.height);
+
+      // backpressure: if WS buffer is large, skip this frame
+      if (ws.bufferedAmount > 512 * 1024) { // 512 KB
+        dropped++;
+      } else {
+        sending = true;
+        const quality = Number(jpegSel.value);
+        await new Promise(res => c.toBlob((blob) => {
+          if (!blob) return res();
+          const fr = new FileReader();
+          fr.onload = () => {
+            try {
+              ws.send(fr.result); // ArrayBuffer
+              sent++;
+            } catch { /* ignore */ }
+            res();
+          };
+          fr.readAsArrayBuffer(blob);
+        }, "image/jpeg", quality));
+        sending = false;
+      }
+
+      // stats every ~1s
+      const now = performance.now();
+      if (now - lastTs > 1000) {
+        stats.textContent = `Sent ${sent}/s · Dropped ${dropped}/s · ${c.width}x${c.height}@${fps}`;
+        sent = dropped = 0; lastTs = now;
+      }
+
+      setTimeout(loop, period);
+    };
+    loop();
+  }
+
+  btnStart.onclick = start;
+  btnStop.onclick = stop;
+  btnFlip.onclick = flip;
+
+  // iOS/safari note
+  if (!("mediaDevices" in navigator)) {
+    alert("Camera API not available in this browser.");
+  }
+})();
+</script>
+</body>
+</html>
