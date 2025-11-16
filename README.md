@@ -1,9 +1,19 @@
-# README
+# Cam-Feed
 
 ## About
 
 
-## How to run
+## Instructions
+
+### Commands to set vite build for wails
+
+```
+npm install -D @tailwindcss/postcss
+npm run build
+
+```
+
+### Commands to Self-Signed OpenSSL certificates 
 
 - The cameras are only accessible via Browsers, inorder to run access camera browsers requires `https` based endpoints. You can generate a self-signed Openssl certificate and use just paste in the project directory.
 
