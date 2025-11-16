@@ -15,7 +15,7 @@ npm run build
 
 ### Commands to Self-Signed OpenSSL certificates 
 
-- The cameras are only accessible via Browsers, inorder to run access camera browsers requires `https` based endpoints. You can generate a self-signed Openssl certificate and use just paste in the project directory.
+    - The cameras are only accessible via Browsers, inorder to run access camera browsers requires `https` based endpoints. You can generate a self-signed Openssl certificate and use just paste in the project directory.
 
     - Generate a private key for our root CA
 
@@ -121,7 +121,10 @@ npm run build
 
         ```
 
+### How to run the application for development
+
     - If you are on Linux, you can use this command
+
         ```
 
         wails dev -tags webkit2_41
