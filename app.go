@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cam-feed/internal/detector"
 	"cam-feed/internal/hub"
 	"context"
 	"fmt"
@@ -11,7 +12,14 @@ import (
 // App struct
 type App struct {
 	ctx context.Context
+	det detector.Detector
 	h   *hub.Hub
+
+	// keep last device selection
+	device detector.Device
+
+	// last warning given
+	lastWarn string
 }
 
 type HubConfig struct {
@@ -21,18 +29,35 @@ type HubConfig struct {
 
 // NewApp creates a new App application struct
 func NewApp() *App {
-	return &App{h: hub.New()}
+	return &App{h: hub.New(), device: detector.DeviceCPU}
 }
 
 // startup is called when the app starts. The context is saved
 // so we can call the runtime methods
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+
+	// 1) Start the hub server in a separate goroutine
 	go func() {
 		if err := a.h.StartServers(ctx); err != nil {
 			log.Printf("server closed: %v\n", err)
 		}
 	}()
+
+	// 2) Configuring ONNX runtime
+	cpuLib, gpuLib, gpuLibDir, err := a.resolveOrtPaths()
+	if err != nil {
+		log.Printf("[detector] ORT path resolve failed %v", err)
+		return
+	}
+
+	detector.ConfigureOrtRuntime(cpuLib, gpuLib, gpuLibDir) // you’ll add this helper (see below)
+
+	// 3) Create the detector (default CPU). If you want auto-GPU when available,
+	// set a.device = detector.DeviceGPU here, then let fallback happen.
+	if err := a.rebuildDetector(a.device); err != nil {
+		log.Printf("[detector] init failed: %v", err)
+	}
 }
 
 func getLocalIP() string {
