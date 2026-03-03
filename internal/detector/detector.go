@@ -76,3 +76,17 @@ func New(cfg Config) (Detector, error) {
 	// newOnnxDetector is implemented in onnx.go
 	return newOnnxDetector(cfg)
 }
+
+// NewWithInfo returns (detector, activeDevice, warning, error).
+// activeDevice may be CPU even if cfg.Device is GPU (fallback).
+func NewWithInfo(cfg Config) (Detector, Device, error, error) {
+	d, err := newOnnxDetector(cfg)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	od, ok := d.(*onnxDetector)
+	if !ok {
+		return d, cfg.Device, nil, nil
+	}
+	return d, od.activeDevice, od.warn, nil
+}

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { GetLanIngestURLs, GetHubConfig } from "../wailsjs/go/main/App";
+import { DetectImage } from "../wailsjs/go/main/App";
 
 /* -------------------- Types -------------------- */
 type StreamMeta = {
@@ -31,6 +32,10 @@ class FrameQueue {
   }
 }
 const frames = new Map<string, FrameQueue>();
+type Detection = { label: string; score: number; box: [number, number, number, number] };
+type DetResult = { origW: number; origH: number; detections: Detection[] }; // recommended (see note)
+
+const detCache = new Map<string, Detection[]>();
 
 /* -------------------- WS hook -------------------- */
 function useViewerWS(
@@ -50,7 +55,7 @@ function useViewerWS(
 
       ws.onmessage = (ev) => {
         if (typeof ev.data === "string") {
-          try { onEvent(JSON.parse(ev.data)); } catch {}
+          try { onEvent(JSON.parse(ev.data)); } catch { }
         } else {
           const dv = new DataView(ev.data as ArrayBuffer);
           const idLen = dv.getUint16(0, false);
@@ -67,7 +72,7 @@ function useViewerWS(
     };
 
     open();
-    return () => { try { ws?.close(); } catch {} };
+    return () => { try { ws?.close(); } catch { } };
   }, [url, onEvent, onFrame]);
 }
 
@@ -121,28 +126,153 @@ export default function App() {
   useViewerWS(viewerURL, handleEvent, handleFrame);
 
   /* ------------ Canvas drawing hook (no callback-ref) ----------- */
+  // function useDrawToCanvas(id: string) {
+  //   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  //   const rafRef = useRef<number | null>(null);
+
+  //   useEffect(() => {
+  //     const el = canvasRef.current;
+  //     if (!el) return;
+  //     const ctx = el.getContext("2d");
+  //     const img = new Image();
+
+  //     const loop = () => {
+  //       const buf = frames.get(id)?.popLatest();
+  //       if (buf) {
+  //         const url = URL.createObjectURL(new Blob([buf], { type: "image/jpeg" }));
+  //         img.onload = () => {
+  //           el.width = img.naturalWidth;
+  //           el.height = img.naturalHeight;
+  //           ctx?.drawImage(img, 0, 0, el.width, el.height);
+  //           URL.revokeObjectURL(url);
+  //         };
+  //         img.src = url;
+  //       }
+  //       rafRef.current = requestAnimationFrame(loop);
+  //     };
+
+  //     rafRef.current = requestAnimationFrame(loop);
+  //     return () => {
+  //       if (rafRef.current) cancelAnimationFrame(rafRef.current);
+  //       rafRef.current = null;
+  //     };
+  //   }, [id]);
+
+  //   return canvasRef;
+  // }
+
   function useDrawToCanvas(id: string) {
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const rafRef = useRef<number | null>(null);
+
+    // throttle detection
+    const lastInferRef = useRef<number>(0);
+    const inflightRef = useRef<boolean>(false);
 
     useEffect(() => {
       const el = canvasRef.current;
       if (!el) return;
       const ctx = el.getContext("2d");
+      if (!ctx) return;
+
       const img = new Image();
 
-      const loop = () => {
+      const drawBoxes = (dets: Detection[]) => {
+        if (!dets?.length) return;
+
+        ctx.lineWidth = Math.max(2, el.width / 400);
+        ctx.font = `${Math.max(14, el.width / 50)}px sans-serif`;
+        ctx.textBaseline = "top";
+
+        for (const d of dets) {
+          const [x1, y1, x2, y2] = d.box;
+          const w = x2 - x1;
+          const h = y2 - y1;
+          if (w <= 1 || h <= 1) continue;
+
+          ctx.strokeStyle = "lime";
+          ctx.strokeRect(x1, y1, w, h);
+
+          const label = `${d.label} ${(d.score * 100).toFixed(0)}%`;
+          ctx.fillStyle = "rgba(0,0,0,0.5)";
+          const pad = 3;
+          const tw = ctx.measureText(label).width;
+          ctx.fillRect(x1, Math.max(0, y1 - 18), tw + pad * 2, 18);
+
+          ctx.fillStyle = "lime";
+          ctx.fillText(label, x1 + pad, Math.max(0, y1 - 18));
+        }
+      };
+
+      const loop = async () => {
         const buf = frames.get(id)?.popLatest();
         if (buf) {
-          const url = URL.createObjectURL(new Blob([buf], { type: "image/jpeg" }));
-          img.onload = () => {
-            el.width = img.naturalWidth;
-            el.height = img.naturalHeight;
-            ctx?.drawImage(img, 0, 0, el.width, el.height);
+          // 1) Drop tiny packets early (not a JPEG frame)
+          if (buf.byteLength < 2000) {
+            // console.debug("skip tiny ws packet", id, buf.byteLength);
+            rafRef.current = requestAnimationFrame(loop);
+            return;
+          }
+
+          const blob = new Blob([buf], { type: "image/jpeg" });
+          const url = URL.createObjectURL(blob);
+
+          // Create a NEW Image per frame to avoid races
+          const frameImg = new Image();
+
+          frameImg.onload = async () => {
+            try {
+              el.width = frameImg.naturalWidth;
+              el.height = frameImg.naturalHeight;
+
+              if (el.width === 0 || el.height === 0) return;
+
+              ctx.clearRect(0, 0, el.width, el.height);
+              ctx.drawImage(frameImg, 0, 0, el.width, el.height);
+
+              const cached = detCache.get(id);
+              if (cached) drawBoxes(cached);
+
+              const now = performance.now();
+              const intervalMs = 333;
+
+              if (!inflightRef.current && now - lastInferRef.current >= intervalMs) {
+                inflightRef.current = true;
+                lastInferRef.current = now;
+
+                // 2) Use toBlob safely (it can be null)
+                const jpegBlob: Blob | null = await new Promise((resolve) =>
+                  el.toBlob((b) => resolve(b), "image/jpeg", 0.85)
+                );
+                console.log("jpeg size", jpegBlob?.size);
+
+                if (!jpegBlob || jpegBlob.size < 2000) {
+                  // console.warn("skip invalid canvas jpeg", jpegBlob?.size);
+                  return;
+                }
+
+                const jpegBuf = await jpegBlob.arrayBuffer();
+
+                // 3) Call Go with number[]
+                const dets = await DetectImage(Array.from(new Uint8Array(jpegBuf)));
+                detCache.set(id, dets as any);
+              }
+            } catch (e) {
+              console.warn("DetectImage failed", e);
+            } finally {
+              inflightRef.current = false;
+              URL.revokeObjectURL(url);
+            }
+          };
+
+          frameImg.onerror = () => {
+            // not a decodable image
             URL.revokeObjectURL(url);
           };
-          img.src = url;
+
+          frameImg.src = url;
         }
+
         rafRef.current = requestAnimationFrame(loop);
       };
 

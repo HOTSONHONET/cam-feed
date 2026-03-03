@@ -4,9 +4,12 @@ import (
 	"cam-feed/internal/detector"
 	"cam-feed/internal/hub"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"path/filepath"
+	"runtime"
 )
 
 // App struct
@@ -37,20 +40,20 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 
-	// 1) Start the hub server in a separate goroutine
+	// 1) Start your servers
 	go func() {
 		if err := a.h.StartServers(ctx); err != nil {
 			log.Printf("server closed: %v\n", err)
 		}
 	}()
 
-	// 2) Configuring ONNX runtime
+	// 2) Configure ONNX Runtime shared libraries (CPU/GPU)
+	// You must set correct paths for your packaged app.
 	cpuLib, gpuLib, gpuLibDir, err := a.resolveOrtPaths()
 	if err != nil {
-		log.Printf("[detector] ORT path resolve failed %v", err)
+		log.Printf("[detector] ORT path resolve failed: %v", err)
 		return
 	}
-
 	detector.ConfigureOrtRuntime(cpuLib, gpuLib, gpuLibDir) // you’ll add this helper (see below)
 
 	// 3) Create the detector (default CPU). If you want auto-GPU when available,
@@ -67,7 +70,7 @@ func getLocalIP() string {
 	}
 
 	for _, iface := range ifaces {
-		if iface.Flags*net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
 
@@ -126,4 +129,85 @@ func (a *App) GetLanIngestURLs(token string, room string, wsScheme string) []str
 	}
 
 	return out
+}
+
+// --- Detector control (called by frontend) ---
+
+func (a *App) resolveOrtPaths() (cpuLib, gpuLib, gpuLibDir string, err error) {
+	// For now assume you're running from repo root in dev mode.
+	// For packaged mode, you'll adjust to use the app's resources path.
+	ver := "1.24.2"
+	base := filepath.Join("third_party", "onnxruntime", ver)
+
+	switch runtime.GOOS {
+	case "linux":
+		cpuLib = filepath.Join(base, "onnxruntime_cpu.so")
+		gpuLib = filepath.Join(base, "onnxruntime_gpu.so")
+		gpuLibDir = filepath.Join(base, "gpu_libs")
+		return cpuLib, gpuLib, gpuLibDir, nil
+	default:
+		return "", "", "", fmt.Errorf("resolveOrtPaths: GOOS=%s not wired yet", runtime.GOOS)
+	}
+}
+
+// SetInferenceDevice lets user pick "cpu" or "gpu". It rebuilds the detector.
+// Returns the active device (could be "cpu" even if requested "gpu" due to fallback).
+func (a *App) SetInferenceDevice(device string) (string, error) {
+	var d detector.Device
+	switch device {
+	case string(detector.DeviceCPU):
+		d = detector.DeviceCPU
+	case string(detector.DeviceGPU):
+		d = detector.DeviceGPU
+	default:
+		return "", errors.New("device must be 'cpu' or 'gpu'")
+	}
+
+	if err := a.rebuildDetector(d); err != nil {
+		return "", err
+	}
+	return string(a.device), nil
+}
+
+// DetectImage runs inference on image bytes from the frontend.
+func (a *App) DetectImage(imageBytes []byte) ([]detector.Detection, error) {
+	if a.det == nil {
+		return nil, errors.New("detector not initialized")
+	}
+	return a.det.Detect(imageBytes)
+}
+
+// GetDetectorInfo is optional: useful for UI to show status.
+func (a *App) GetDetectorInfo() map[string]string {
+	return map[string]string{
+		"device":  string(a.device),
+		"warning": a.lastWarn,
+	}
+}
+
+// rebuildDetector closes old detector and creates a new one with requested device.
+// If GPU fails, your runtime manager will fallback to CPU; we reflect that via info.
+func (a *App) rebuildDetector(req detector.Device) error {
+	// close existing
+	if a.det != nil {
+		_ = a.det.Close()
+		a.det = nil
+	}
+
+	cfg := detector.DefaultConfig()
+	cfg.Device = req
+
+	d, activeDev, warn, err := detector.NewWithInfo(cfg) // you’ll add this helper (see below)
+	if err != nil {
+		return err
+	}
+
+	a.det = d
+	a.device = activeDev
+	if warn != nil {
+		a.lastWarn = warn.Error()
+	} else {
+		a.lastWarn = ""
+	}
+	return nil
 }

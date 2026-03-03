@@ -3,12 +3,15 @@ package detector
 import (
 	"bytes"
 	"embed"
+	"fmt"
+	"log"
 	"os"
 	"sync"
 
 	"image"
 	_ "image/jpeg" // Import for JPEG support
-	_ "image/png"  // Import for PNG support
+
+	_ "image/png" // Import for PNG support
 
 	ort "github.com/yalue/onnxruntime_go"
 )
@@ -64,7 +67,7 @@ func newOnnxDetector(cfg Config) (Detector, error) {
 	}
 
 	// 4) Define ONNX graph
-	inName := "image"
+	inName := "images"
 	outName := "output0"
 
 	// 5) Create input/output tensors (input -> [1, 3, 640, 640], output -> [1, 84, 8400])
@@ -141,7 +144,17 @@ func (d *onnxDetector) Detect(imageBytes []byte) ([]Detection, error) {
 		return nil, err
 	}
 
+	log.Printf("[detector] session run completed: %v", d.outputData[:10]) // log first 10 elements
+
 	dets := postprocessYOLOv8(d.outputData, meta, d.cfg, d.labels)
+
+	if len(dets) > 0 {
+		fmt.Printf("[detector] dets=%d first=%+v orig=%dx%d pad=(%d,%d) scale=%.4f\n",
+			len(dets), dets[0], meta.OrigW, meta.OrigH, meta.PadX, meta.PadY, meta.Scale)
+	} else {
+		fmt.Printf("[detector] dets=0 (score_th=%.2f)\n", d.cfg.ScoreThreshold)
+	}
+
 	return dets, nil
 }
 
