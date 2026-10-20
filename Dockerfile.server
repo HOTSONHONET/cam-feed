@@ -18,7 +18,7 @@ FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
+    ca-certificates ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /out/cam-feed-server /app/cam-feed-server
