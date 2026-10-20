@@ -76,25 +76,30 @@ func (r *ortRuntime) acquire(device Device) (activeDevice Device, warn error, er
 	// Fresh initialization
 	if device == DeviceGPU {
 		if r.gpuLibPath == "" {
-			// No GPU library configured -> fallback to CPU
 			if err := initWith(DeviceCPU, r.cpuLibPath); err != nil {
 				return "", nil, err
 			}
+
+			r.refCount++
+			return DeviceCPU, errors.New("GPU runtime not configured; falling back to CPU"), nil
 		}
 
 		if err := initWith(DeviceGPU, r.gpuLibPath); err == nil {
 			r.refCount++
 			return DeviceGPU, nil, nil
-		}
+		} else {
+			gpuErr := fmt.Errorf("GPU init failed; falling back to CPU: %w", err)
 
-		// GPU init failed -> fallback to CPU
-		gpuErr := errors.New("GPU init failed; falling back to CPU: " + err.Error())
-		if err := initWith(DeviceCPU, r.cpuLibPath); err != nil {
-			return "", nil, err
-		}
+			ort.DestroyEnvironment()
+			r.inited = false
 
-		r.refCount++
-		return DeviceGPU, gpuErr, nil
+			if err := initWith(DeviceCPU, r.cpuLibPath); err != nil {
+				return "", nil, err
+			}
+
+			r.refCount++
+			return DeviceCPU, gpuErr, nil
+		}
 	}
 
 	// CPU requested
