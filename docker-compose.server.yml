@@ -1,0 +1,26 @@
+services:
+  cam-feed:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: cam-feed
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    ports:
+      - "6699:6699"
+
+    volumes:
+      - ./snapshots:/app/snapshots
+      - ./cert.pem:/app/cert.pem:ro
+      - ./key.pem:/app/key.pem:ro
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
