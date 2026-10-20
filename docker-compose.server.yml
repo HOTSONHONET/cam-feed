@@ -12,6 +12,9 @@ services:
     ports:
       - "6699:6699"
 
+    devices:
+      - /dev/video0:/dev/video0
+
     volumes:
       - ./snapshots:/app/snapshots
       - ./cert.pem:/app/cert.pem:ro
