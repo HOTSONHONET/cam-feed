@@ -102,6 +102,97 @@ func (h *Hub) SetFrameProcessor(processor FrameProcessor) {
 	h.mu.Unlock()
 }
 
+func (h *Hub) RegisterLocalStream(meta StreamMeta) {
+	if strings.TrimSpace(meta.Room) == "" {
+		meta.Room = DefaultRoom
+	}
+	meta.LastSeen = time.Now().UnixMilli()
+
+	h.mu.Lock()
+	h.metas[meta.DeviceID] = meta
+	var viewers []*websocket.Conn
+	if vset := h.viewers[meta.Room]; vset != nil {
+		for v := range vset {
+			viewers = append(viewers, v)
+		}
+	}
+	h.mu.Unlock()
+
+	if len(viewers) > 0 {
+		event := map[string]any{"type": "join", "stream": meta}
+		for _, v := range viewers {
+			_ = safeWriteJSON(v, event)
+		}
+	}
+}
+
+func (h *Hub) UnregisterLocalStream(deviceID, room string) {
+	if strings.TrimSpace(room) == "" {
+		room = DefaultRoom
+	}
+
+	h.mu.Lock()
+	delete(h.metas, deviceID)
+	var viewers []*websocket.Conn
+	if vset := h.viewers[room]; vset != nil {
+		for v := range vset {
+			viewers = append(viewers, v)
+		}
+	}
+	h.mu.Unlock()
+
+	if len(viewers) > 0 {
+		event := map[string]any{"type": "leave", "device_id": deviceID}
+		for _, v := range viewers {
+			_ = safeWriteJSON(v, event)
+		}
+	}
+}
+
+func (h *Hub) PublishLocalFrame(meta StreamMeta, frame []byte) {
+	if len(frame) == 0 {
+		return
+	}
+	if strings.TrimSpace(meta.Room) == "" {
+		meta.Room = DefaultRoom
+	}
+
+	h.mu.RLock()
+	processor := h.processor
+	var viewers []*websocket.Conn
+	if vset := h.viewers[meta.Room]; vset != nil {
+		for v := range vset {
+			viewers = append(viewers, v)
+		}
+	}
+	h.mu.RUnlock()
+
+	if processor != nil {
+		processor.Submit(meta.DeviceID, frame)
+	}
+
+	header := make([]byte, 2+len(meta.DeviceID))
+	binary.BigEndian.PutUint16(header[:2], uint16(len(meta.DeviceID)))
+	copy(header[2:], []byte(meta.DeviceID))
+	payload := append(header, frame...)
+
+	var failConns []*websocket.Conn
+	for _, v := range viewers {
+		if err := safeWriteMessage(v, websocket.BinaryMessage, payload); err != nil {
+			failConns = append(failConns, v)
+		}
+	}
+
+	if len(failConns) > 0 {
+		h.mu.Lock()
+		for _, v := range failConns {
+			delete(h.viewers[meta.Room], v)
+			forgetConn(v)
+		}
+		h.mu.Unlock()
+	}
+}
+
 func (h *Hub) HealthCheck(w http.ResponseWriter, _ *http.Request) {
 	w.Write([]byte("I am alive"))
 }
