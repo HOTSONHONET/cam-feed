@@ -26,6 +26,10 @@ type StreamMeta struct {
 	LastSeen int64  `json:"last_seen,omitempty"`
 }
 
+type FrameProcessor interface {
+	Submit(deviceID string, frame []byte)
+}
+
 type Hub struct {
 	upgrader websocket.Upgrader
 
@@ -33,6 +37,8 @@ type Hub struct {
 	viewers map[string]map[*websocket.Conn]bool // room -> viewers
 	ingest  map[string]*websocket.Conn          // deviceID -> conn
 	metas   map[string]StreamMeta               // deviceID -> meta
+
+	processor FrameProcessor
 }
 
 // one write mutex per websocket.Conn to prevent concurrent writes
@@ -88,6 +94,12 @@ func New() *Hub {
 		ingest:  map[string]*websocket.Conn{},
 		metas:   map[string]StreamMeta{},
 	}
+}
+
+func (h *Hub) SetFrameProcessor(processor FrameProcessor) {
+	h.mu.Lock()
+	h.processor = processor
+	h.mu.Unlock()
 }
 
 func (h *Hub) HealthCheck(w http.ResponseWriter, _ *http.Request) {
@@ -181,6 +193,13 @@ func (h *Hub) HandleIngest(w http.ResponseWriter, r *http.Request) {
 
 		if mt != websocket.BinaryMessage {
 			continue
+		}
+
+		h.mu.RLock()
+		processor := h.processor
+		h.mu.RUnlock()
+		if processor != nil {
+			processor.Submit(deviceID, frame)
 		}
 
 		// Sending new Frames to viewers
