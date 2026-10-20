@@ -170,22 +170,30 @@ func (h *Hub) HandleIngest(w http.ResponseWriter, r *http.Request) {
 
 	// Reading frames and forwarding to viewers
 	deviceID := meta.DeviceID
-	for {
 
-		c.SetReadLimit(int64(MaxReadBufferSizeForFrames))
-		_ = c.SetReadDeadline(time.Now().Add(MaxTimeLimitForPong * time.Second))
-		c.SetPongHandler(func(string) error {
-			return c.SetReadDeadline(time.Now().Add(MaxTimeLimitForPong * time.Second))
-		})
-		go func() {
-			t := time.NewTicker(MaxTimeLimitForPing * time.Second)
-			defer t.Stop()
-			for range t.C {
+	c.SetReadLimit(int64(MaxReadBufferSizeForFrames))
+	_ = c.SetReadDeadline(time.Now().Add(MaxTimeLimitForPong * time.Second))
+	c.SetPongHandler(func(string) error {
+		return c.SetReadDeadline(time.Now().Add(MaxTimeLimitForPong * time.Second))
+	})
+
+	pingDone := make(chan struct{})
+	defer close(pingDone)
+	go func() {
+		t := time.NewTicker(MaxTimeLimitForPing * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-pingDone:
+				return
+			case <-t.C:
 				// Some mobile stacks reply to ping; others don't — harmless either way.
 				_ = safeWriteControl(c, websocket.PingMessage, nil, time.Now().Add(5*time.Second))
 			}
-		}()
+		}
+	}()
 
+	for {
 		mt, frame, err := c.ReadMessage()
 		if err != nil {
 			break
