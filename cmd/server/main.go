@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cam-feed/internal/alerts"
+	"cam-feed/internal/camera"
 	"cam-feed/internal/detector"
 	"cam-feed/internal/hub"
 	"cam-feed/internal/surveillance"
@@ -42,9 +43,16 @@ func main() {
 	log.Printf("[detector] active device: %s", activeDevice)
 
 	var notifier alerts.Notifier
-	if webhook := strings.TrimSpace(os.Getenv("SLACK_WEBHOOK_URL")); webhook != "" {
-		notifier = alerts.NewSlackNotifier(webhook)
-		log.Printf("[alerts] Slack notifications enabled")
+	webhook := strings.TrimSpace(os.Getenv("SLACK_WEBHOOK_URL"))
+	botToken := strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN"))
+	channelID := strings.TrimSpace(os.Getenv("SLACK_CHANNEL_ID"))
+	if webhook != "" || (botToken != "" && channelID != "") {
+		notifier = alerts.NewSlackNotifier(webhook, botToken, channelID)
+		if botToken != "" && channelID != "" {
+			log.Printf("[alerts] Slack snapshot uploads enabled")
+		} else {
+			log.Printf("[alerts] Slack text notifications enabled")
+		}
 	}
 
 	survCfg := surveillance.DefaultConfig()
@@ -59,6 +67,25 @@ func main() {
 
 	h := hub.New()
 	h.SetFrameProcessor(processor)
+
+	localCfg := camera.DefaultLocalConfig()
+	localCfg.Enabled = envBool("LOCAL_CAMERA_ENABLED", false)
+	localCfg.Device = env("LOCAL_CAMERA_DEVICE", localCfg.Device)
+	localCfg.DeviceID = env("LOCAL_CAMERA_DEVICE_ID", localCfg.DeviceID)
+	localCfg.Room = env("LOCAL_CAMERA_ROOM", localCfg.Room)
+	localCfg.Width = envInt("LOCAL_CAMERA_WIDTH", localCfg.Width)
+	localCfg.Height = envInt("LOCAL_CAMERA_HEIGHT", localCfg.Height)
+	localCfg.InputFPS = envInt("LOCAL_CAMERA_INPUT_FPS", localCfg.InputFPS)
+	localCfg.OutputFPS = envInt("LOCAL_CAMERA_OUTPUT_FPS", localCfg.OutputFPS)
+	localCfg.JPEGQuality = envInt("LOCAL_CAMERA_JPEG_QUALITY", localCfg.JPEGQuality)
+
+	if localCfg.Enabled {
+		go func() {
+			if err := camera.RunLocal(ctx, localCfg, h); err != nil && ctx.Err() == nil {
+				log.Printf("[camera] local camera stopped: %v", err)
+			}
+		}()
+	}
 
 	log.Printf("[server] starting cam-feed headless hub")
 	if err := h.StartServers(ctx); err != nil && ctx.Err() == nil {
@@ -117,4 +144,30 @@ func envList(key string, fallback []string) []string {
 		return fallback
 	}
 	return out
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		log.Printf("[config] invalid %s=%q, using %t", key, value, fallback)
+		return fallback
+	}
+	return parsed
+}
+
+func envInt(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		log.Printf("[config] invalid %s=%q, using %d", key, value, fallback)
+		return fallback
+	}
+	return parsed
 }
