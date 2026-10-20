@@ -6,8 +6,8 @@ ROOT="third_party/onnxruntime/${VER}"
 mkdir -p "${ROOT}"
 cd "${ROOT}"
 
-CPU_URL="https://sourceforge.net/projects/onnx-runtime.mirror/files/v${VER}/onnxruntime-linux-x64-${VER}.tgz/download"
-GPU_URL="https://sourceforge.net/projects/onnx-runtime.mirror/files/v${VER}/onnxruntime-linux-x64-gpu-${VER}.tgz/download"
+CPU_URL="https://github.com/microsoft/onnxruntime/releases/download/v${VER}/onnxruntime-linux-x64-${VER}.tgz"
+GPU_URL="https://github.com/microsoft/onnxruntime/releases/download/v${VER}/onnxruntime-linux-x64-gpu-${VER}.tgz"
 
 echo "[+] Download CPU"
 wget -O ort_cpu.tgz "${CPU_URL}"

@@ -1,0 +1,31 @@
+FROM golang:1.23-bookworm AS builder
+
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget ca-certificates tar \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN chmod +x ./onnxruntime_downloader.sh && ./onnxruntime_downloader.sh
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -o /out/cam-feed-server ./cmd/server
+
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /out/cam-feed-server /app/cam-feed-server
+COPY --from=builder /src/third_party /app/third_party
+
+RUN mkdir -p /app/snapshots
+
+EXPOSE 6699
+
+ENTRYPOINT ["/app/cam-feed-server"]

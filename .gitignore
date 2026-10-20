@@ -9,3 +9,5 @@ rootCA.srl
 san.cnf
 server.csr
 third_party
+.env
+snapshots/
